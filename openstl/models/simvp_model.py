@@ -25,12 +25,14 @@ class SimVP_Model(nn.Module):
         self.dec = Decoder(hid_S, C, N_S, spatio_kernel_dec, act_inplace=act_inplace)
 
         model_type = 'gsta' if model_type is None else model_type.lower()
-        if model_type == 'incepu':
-            self.hid = MidIncepNet(T*hid_S, hid_T, N_T)
-        else:
-            self.hid = MidMetaNet(T*hid_S, hid_T, N_T,
-                input_resolution=(H, W), model_type=model_type,
-                mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
+        # if model_type == 'incepu':
+            # self.hid = MidIncepNet(T*hid_S, hid_T, N_T)
+        # else:
+            # self.hid = MidMetaNet(T*hid_S, hid_T, N_T,
+            #     input_resolution=(H, W), model_type=model_type,
+            #     mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
+
+        self.hid = ContinuousDynamicsNet(T*hid_S, hid_T, N_T)
 
     def forward(self, x_raw, **kwargs):
         B, T, C, H, W = x_raw.shape
@@ -101,54 +103,54 @@ class Decoder(nn.Module):
         return Y
 
 
-class MidIncepNet(nn.Module):
-    """The hidden Translator of IncepNet for SimVPv1"""
+# class MidIncepNet(nn.Module):
+#     """The hidden Translator of IncepNet for SimVPv1"""
 
-    def __init__(self, channel_in, channel_hid, N2, incep_ker=[3,5,7,11], groups=8, **kwargs):
-        super(MidIncepNet, self).__init__()
-        assert N2 >= 2 and len(incep_ker) > 1
-        self.N2 = N2
-        enc_layers = [gInception_ST(
-            channel_in, channel_hid//2, channel_hid, incep_ker= incep_ker, groups=groups)]
-        for i in range(1,N2-1):
-            enc_layers.append(
-                gInception_ST(channel_hid, channel_hid//2, channel_hid,
-                              incep_ker=incep_ker, groups=groups))
-        enc_layers.append(
-                gInception_ST(channel_hid, channel_hid//2, channel_hid,
-                              incep_ker=incep_ker, groups=groups))
-        dec_layers = [
-                gInception_ST(channel_hid, channel_hid//2, channel_hid,
-                              incep_ker=incep_ker, groups=groups)]
-        for i in range(1,N2-1):
-            dec_layers.append(
-                gInception_ST(2*channel_hid, channel_hid//2, channel_hid,
-                              incep_ker=incep_ker, groups=groups))
-        dec_layers.append(
-                gInception_ST(2*channel_hid, channel_hid//2, channel_in,
-                              incep_ker=incep_ker, groups=groups))
+#     def __init__(self, channel_in, channel_hid, N2, incep_ker=[3,5,7,11], groups=8, **kwargs):
+#         super(MidIncepNet, self).__init__()
+#         assert N2 >= 2 and len(incep_ker) > 1
+#         self.N2 = N2
+#         enc_layers = [gInception_ST(
+#             channel_in, channel_hid//2, channel_hid, incep_ker= incep_ker, groups=groups)]
+#         for i in range(1,N2-1):
+#             enc_layers.append(
+#                 gInception_ST(channel_hid, channel_hid//2, channel_hid,
+#                               incep_ker=incep_ker, groups=groups))
+#         enc_layers.append(
+#                 gInception_ST(channel_hid, channel_hid//2, channel_hid,
+#                               incep_ker=incep_ker, groups=groups))
+#         dec_layers = [
+#                 gInception_ST(channel_hid, channel_hid//2, channel_hid,
+#                               incep_ker=incep_ker, groups=groups)]
+#         for i in range(1,N2-1):
+#             dec_layers.append(
+#                 gInception_ST(2*channel_hid, channel_hid//2, channel_hid,
+#                               incep_ker=incep_ker, groups=groups))
+#         dec_layers.append(
+#                 gInception_ST(2*channel_hid, channel_hid//2, channel_in,
+#                               incep_ker=incep_ker, groups=groups))
 
-        self.enc = nn.Sequential(*enc_layers)
-        self.dec = nn.Sequential(*dec_layers)
+#         self.enc = nn.Sequential(*enc_layers)
+#         self.dec = nn.Sequential(*dec_layers)
 
-    def forward(self, x):
-        B, T, C, H, W = x.shape
-        x = x.reshape(B, T*C, H, W)
+#     def forward(self, x):
+#         B, T, C, H, W = x.shape
+#         x = x.reshape(B, T*C, H, W)
 
-        # encoder
-        skips = []
-        z = x
-        for i in range(self.N2):
-            z = self.enc[i](z)
-            if i < self.N2-1:
-                skips.append(z)
-        # decoder
-        z = self.dec[0](z)
-        for i in range(1,self.N2):
-            z = self.dec[i](torch.cat([z, skips[-i]], dim=1) )
+#         # encoder
+#         skips = []
+#         z = x
+#         for i in range(self.N2):
+#             z = self.enc[i](z)
+#             if i < self.N2-1:
+#                 skips.append(z)
+#         # decoder
+#         z = self.dec[0](z)
+#         for i in range(1,self.N2):
+#             z = self.dec[i](torch.cat([z, skips[-i]], dim=1) )
 
-        y = z.reshape(B, T, C, H, W)
-        return y
+#         y = z.reshape(B, T, C, H, W)
+#         return y
 
 
 class MetaBlock(nn.Module):
@@ -212,40 +214,133 @@ class MetaBlock(nn.Module):
         return z if self.in_channels == self.out_channels else self.reduction(z)
 
 
-class MidMetaNet(nn.Module):
-    """The hidden Translator of MetaFormer for SimVP"""
+# class MidMetaNet(nn.Module):
+#     """The hidden Translator of MetaFormer for SimVP"""
 
-    def __init__(self, channel_in, channel_hid, N2,
-                 input_resolution=None, model_type=None,
-                 mlp_ratio=4., drop=0.0, drop_path=0.1):
-        super(MidMetaNet, self).__init__()
-        assert N2 >= 2 and mlp_ratio > 1
-        self.N2 = N2
-        dpr = [  # stochastic depth decay rule
-            x.item() for x in torch.linspace(1e-2, drop_path, self.N2)]
+#     def __init__(self, channel_in, channel_hid, N2,
+#                  input_resolution=None, model_type=None,
+#                  mlp_ratio=4., drop=0.0, drop_path=0.1):
+#         super(MidMetaNet, self).__init__()
+#         assert N2 >= 2 and mlp_ratio > 1
+#         self.N2 = N2
+#         dpr = [  # stochastic depth decay rule
+#             x.item() for x in torch.linspace(1e-2, drop_path, self.N2)]
 
-        # downsample
-        enc_layers = [MetaBlock(
-            channel_in, channel_hid, input_resolution, model_type,
-            mlp_ratio, drop, drop_path=dpr[0], layer_i=0)]
-        # middle layers
-        for i in range(1, N2-1):
-            enc_layers.append(MetaBlock(
-                channel_hid, channel_hid, input_resolution, model_type,
-                mlp_ratio, drop, drop_path=dpr[i], layer_i=i))
-        # upsample
-        enc_layers.append(MetaBlock(
-            channel_hid, channel_in, input_resolution, model_type,
-            mlp_ratio, drop, drop_path=drop_path, layer_i=N2-1))
-        self.enc = nn.Sequential(*enc_layers)
+#         # downsample
+#         enc_layers = [MetaBlock(
+#             channel_in, channel_hid, input_resolution, model_type,
+#             mlp_ratio, drop, drop_path=dpr[0], layer_i=0)]
+#         # middle layers
+#         for i in range(1, N2-1):
+#             enc_layers.append(MetaBlock(
+#                 channel_hid, channel_hid, input_resolution, model_type,
+#                 mlp_ratio, drop, drop_path=dpr[i], layer_i=i))
+#         # upsample
+#         enc_layers.append(MetaBlock(
+#             channel_hid, channel_in, input_resolution, model_type,
+#             mlp_ratio, drop, drop_path=drop_path, layer_i=N2-1))
+#         self.enc = nn.Sequential(*enc_layers)
+
+#     def forward(self, x):
+#         B, T, C, H, W = x.shape
+#         x = x.reshape(B, T*C, H, W)
+
+#         z = x
+#         for i in range(self.N2):
+#             z = self.enc[i](z)
+
+#         y = z.reshape(B, T, C, H, W)
+#         return y
+
+
+class ContinuousDynamicsBlock(nn.Module):
+    """
+    Continuous latent dynamics block.
+
+    h_{k+1} = (1-a)h_k + aF(h_k)
+
+    where
+        a = sigmoid(alpha)
+
+    """
+
+    def __init__(self,
+                 channels,
+                 expansion=4,
+                 drop=0.0):
+        super().__init__()
+
+        hidden = channels * expansion
+
+        self.norm = nn.GroupNorm(8, channels)
+
+        # Spatial mixing
+        self.dwconv = nn.Conv2d(
+            channels,
+            channels,
+            kernel_size=5,
+            padding=2,
+            groups=channels,
+            bias=False
+        )
+
+        # Channel expansion
+        self.pwconv1 = nn.Conv2d(
+            channels,
+            hidden,
+            kernel_size=1,
+            bias=False
+        )
+
+        self.act = nn.GELU()
+
+        # Channel projection
+        self.pwconv2 = nn.Conv2d(
+            hidden,
+            channels,
+            kernel_size=1,
+            bias=False
+        )
+
+        self.dropout = nn.Dropout2d(drop)
+
+        # Learnable continuous-time coefficient
+        self.alpha = nn.Parameter(torch.zeros(1))
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+
+        if isinstance(m, nn.Conv2d):
+
+            nn.init.kaiming_normal_(
+                m.weight,
+                mode='fan_out',
+                nonlinearity='relu'
+            )
+
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
 
     def forward(self, x):
-        B, T, C, H, W = x.shape
-        x = x.reshape(B, T*C, H, W)
 
-        z = x
-        for i in range(self.N2):
-            z = self.enc[i](z)
+        residual = x
 
-        y = z.reshape(B, T, C, H, W)
-        return y
+        x = self.norm(x)
+
+        x = self.dwconv(x)
+
+        x = self.pwconv1(x)
+
+        x = self.act(x)
+
+        x = self.dropout(x)
+
+        x = self.pwconv2(x)
+
+        alpha = torch.sigmoid(self.alpha)
+
+        # Continuous latent evolution
+        out = residual + alpha * (x - residual)
+
+        return out
