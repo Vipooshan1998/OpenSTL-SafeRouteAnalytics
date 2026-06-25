@@ -344,3 +344,70 @@ class ContinuousDynamicsBlock(nn.Module):
         out = residual + alpha * (x - residual)
 
         return out
+
+
+class ContinuousDynamicsNet(nn.Module):
+    """
+    Replacement for MidMetaNet.
+
+    Input:
+        (B,T,C,H,W)
+
+    Output:
+        (B,T,C,H,W)
+    """
+
+    def __init__(self,
+                 channel_in,
+                 channel_hid,
+                 N2,
+                 **kwargs):
+
+        super().__init__()
+
+        self.N2 = N2
+
+        layers = []
+
+        # First projection
+        layers.append(
+            nn.Conv2d(
+                channel_in,
+                channel_hid,
+                kernel_size=1,
+                bias=False
+            )
+        )
+
+        # Continuous dynamics
+        for _ in range(N2):
+
+            layers.append(
+                ContinuousDynamicsBlock(
+                    channel_hid
+                )
+            )
+
+        # Projection back
+        layers.append(
+            nn.Conv2d(
+                channel_hid,
+                channel_in,
+                kernel_size=1,
+                bias=False
+            )
+        )
+
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+
+        B, T, C, H, W = x.shape
+
+        x = x.reshape(B, T * C, H, W)
+
+        z = self.net(x)
+
+        y = z.reshape(B, T, C, H, W)
+
+        return y
