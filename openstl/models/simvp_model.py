@@ -32,7 +32,7 @@ class SimVP_Model(nn.Module):
             #     input_resolution=(H, W), model_type=model_type,
             #     mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
 
-        self.hid = ContinuousDynamicsNet(T*hid_S, hid_T, N_T)
+        self.hid = ContinuousDynamicsNet(hid_S, hid_T, N_T)
 
     def forward(self, x_raw, **kwargs):
         B, T, C, H, W = x_raw.shape
@@ -255,7 +255,7 @@ class MetaBlock(nn.Module):
 
 class ContinuousDynamicsBlock(nn.Module):
     """
-    Continuous latent dynamics block.
+    Continuous spatiotemporal latent dynamics block.
 
     h_{k+1} = (1-a)h_k + aF(h_k)
 
@@ -272,20 +272,28 @@ class ContinuousDynamicsBlock(nn.Module):
 
         hidden = channels * expansion
 
-        self.norm = nn.GroupNorm(8, channels)
+        self.norm = nn.BatchNorm3d(channels)
 
-        # Spatial mixing
-        self.dwconv = nn.Conv2d(
+        # Temporal and spatial mixing
+        self.temporal_dw = nn.Conv3d(
             channels,
             channels,
-            kernel_size=5,
-            padding=2,
+            kernel_size=(3, 1, 1),
+            padding=(1, 0, 0),
+            groups=channels,
+            bias=False
+        )
+        self.spatial_dw = nn.Conv3d(
+            channels,
+            channels,
+            kernel_size=(1, 5, 5),
+            padding=(0, 2, 2),
             groups=channels,
             bias=False
         )
 
         # Channel expansion
-        self.pwconv1 = nn.Conv2d(
+        self.pwconv1 = nn.Conv3d(
             channels,
             hidden,
             kernel_size=1,
@@ -295,14 +303,14 @@ class ContinuousDynamicsBlock(nn.Module):
         self.act = nn.GELU()
 
         # Channel projection
-        self.pwconv2 = nn.Conv2d(
+        self.pwconv2 = nn.Conv3d(
             hidden,
             channels,
             kernel_size=1,
             bias=False
         )
 
-        self.dropout = nn.Dropout2d(drop)
+        self.dropout = nn.Dropout3d(drop)
 
         # Learnable continuous-time coefficient
         self.alpha = nn.Parameter(torch.zeros(1))
@@ -310,37 +318,27 @@ class ContinuousDynamicsBlock(nn.Module):
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
-
-        if isinstance(m, nn.Conv2d):
-
+        if isinstance(m, (nn.Conv3d, nn.Conv2d)):
             nn.init.kaiming_normal_(
                 m.weight,
                 mode='fan_out',
                 nonlinearity='relu'
             )
-
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
     def forward(self, x):
-
         residual = x
 
         x = self.norm(x)
-
-        x = self.dwconv(x)
-
+        x = self.temporal_dw(x)
+        x = self.spatial_dw(x)
         x = self.pwconv1(x)
-
         x = self.act(x)
-
         x = self.dropout(x)
-
         x = self.pwconv2(x)
 
         alpha = torch.sigmoid(self.alpha)
-
-        # Continuous latent evolution
         out = residual + alpha * (x - residual)
 
         return out
@@ -371,7 +369,7 @@ class ContinuousDynamicsNet(nn.Module):
 
         # First projection
         layers.append(
-            nn.Conv2d(
+            nn.Conv3d(
                 channel_in,
                 channel_hid,
                 kernel_size=1,
@@ -381,7 +379,6 @@ class ContinuousDynamicsNet(nn.Module):
 
         # Continuous dynamics
         for _ in range(N2):
-
             layers.append(
                 ContinuousDynamicsBlock(
                     channel_hid
@@ -390,7 +387,7 @@ class ContinuousDynamicsNet(nn.Module):
 
         # Projection back
         layers.append(
-            nn.Conv2d(
+            nn.Conv3d(
                 channel_hid,
                 channel_in,
                 kernel_size=1,
@@ -401,13 +398,8 @@ class ContinuousDynamicsNet(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):
-
-        B, T, C, H, W = x.shape
-
-        x = x.reshape(B, T * C, H, W)
-
+        # x: (B, T, C, H, W)
+        x = x.permute(0, 2, 1, 3, 4)  # -> (B, C, T, H, W)
         z = self.net(x)
-
-        y = z.reshape(B, T, C, H, W)
-
+        y = z.permute(0, 2, 1, 3, 4)
         return y
