@@ -153,65 +153,65 @@ class Decoder(nn.Module):
 #         return y
 
 
-class MetaBlock(nn.Module):
-    """The hidden Translator of MetaFormer for SimVP"""
+# class MetaBlock(nn.Module):
+#     """The hidden Translator of MetaFormer for SimVP"""
 
-    def __init__(self, in_channels, out_channels, input_resolution=None, model_type=None,
-                 mlp_ratio=8., drop=0.0, drop_path=0.0, layer_i=0):
-        super(MetaBlock, self).__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        model_type = model_type.lower() if model_type is not None else 'gsta'
+#     def __init__(self, in_channels, out_channels, input_resolution=None, model_type=None,
+#                  mlp_ratio=8., drop=0.0, drop_path=0.0, layer_i=0):
+#         super(MetaBlock, self).__init__()
+#         self.in_channels = in_channels
+#         self.out_channels = out_channels
+#         model_type = model_type.lower() if model_type is not None else 'gsta'
 
-        if model_type == 'gsta':
-            self.block = GASubBlock(
-                in_channels, kernel_size=21, mlp_ratio=mlp_ratio,
-                drop=drop, drop_path=drop_path, act_layer=nn.GELU)
-        elif model_type == 'convmixer':
-            self.block = ConvMixerSubBlock(in_channels, kernel_size=11, activation=nn.GELU)
-        elif model_type == 'convnext':
-            self.block = ConvNeXtSubBlock(
-                in_channels, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
-        elif model_type == 'hornet':
-            self.block = HorNetSubBlock(in_channels, mlp_ratio=mlp_ratio, drop_path=drop_path)
-        elif model_type in ['mlp', 'mlpmixer']:
-            self.block = MLPMixerSubBlock(
-                in_channels, input_resolution, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
-        elif model_type in ['moga', 'moganet']:
-            self.block = MogaSubBlock(
-                in_channels, mlp_ratio=mlp_ratio, drop_rate=drop, drop_path_rate=drop_path)
-        elif model_type == 'poolformer':
-            self.block = PoolFormerSubBlock(
-                in_channels, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
-        elif model_type == 'swin':
-            self.block = SwinSubBlock(
-                in_channels, input_resolution, layer_i=layer_i, mlp_ratio=mlp_ratio,
-                drop=drop, drop_path=drop_path)
-        elif model_type == 'uniformer':
-            block_type = 'MHSA' if in_channels == out_channels and layer_i > 0 else 'Conv'
-            self.block = UniformerSubBlock(
-                in_channels, mlp_ratio=mlp_ratio, drop=drop,
-                drop_path=drop_path, block_type=block_type)
-        elif model_type == 'van':
-            self.block = VANSubBlock(
-                in_channels, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path, act_layer=nn.GELU)
-        elif model_type == 'vit':
-            self.block = ViTSubBlock(
-                in_channels, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
-        elif model_type == 'tau':
-            self.block = TAUSubBlock(
-                in_channels, kernel_size=21, mlp_ratio=mlp_ratio,
-                drop=drop, drop_path=drop_path, act_layer=nn.GELU)
-        else:
-            assert False and "Invalid model_type in SimVP"
+#         if model_type == 'gsta':
+#             self.block = GASubBlock(
+#                 in_channels, kernel_size=21, mlp_ratio=mlp_ratio,
+#                 drop=drop, drop_path=drop_path, act_layer=nn.GELU)
+#         elif model_type == 'convmixer':
+#             self.block = ConvMixerSubBlock(in_channels, kernel_size=11, activation=nn.GELU)
+#         elif model_type == 'convnext':
+#             self.block = ConvNeXtSubBlock(
+#                 in_channels, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
+#         elif model_type == 'hornet':
+#             self.block = HorNetSubBlock(in_channels, mlp_ratio=mlp_ratio, drop_path=drop_path)
+#         elif model_type in ['mlp', 'mlpmixer']:
+#             self.block = MLPMixerSubBlock(
+#                 in_channels, input_resolution, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
+#         elif model_type in ['moga', 'moganet']:
+#             self.block = MogaSubBlock(
+#                 in_channels, mlp_ratio=mlp_ratio, drop_rate=drop, drop_path_rate=drop_path)
+#         elif model_type == 'poolformer':
+#             self.block = PoolFormerSubBlock(
+#                 in_channels, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
+#         elif model_type == 'swin':
+#             self.block = SwinSubBlock(
+#                 in_channels, input_resolution, layer_i=layer_i, mlp_ratio=mlp_ratio,
+#                 drop=drop, drop_path=drop_path)
+#         elif model_type == 'uniformer':
+#             block_type = 'MHSA' if in_channels == out_channels and layer_i > 0 else 'Conv'
+#             self.block = UniformerSubBlock(
+#                 in_channels, mlp_ratio=mlp_ratio, drop=drop,
+#                 drop_path=drop_path, block_type=block_type)
+#         elif model_type == 'van':
+#             self.block = VANSubBlock(
+#                 in_channels, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path, act_layer=nn.GELU)
+#         elif model_type == 'vit':
+#             self.block = ViTSubBlock(
+#                 in_channels, mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
+#         elif model_type == 'tau':
+#             self.block = TAUSubBlock(
+#                 in_channels, kernel_size=21, mlp_ratio=mlp_ratio,
+#                 drop=drop, drop_path=drop_path, act_layer=nn.GELU)
+#         else:
+#             assert False and "Invalid model_type in SimVP"
 
-        if in_channels != out_channels:
-            self.reduction = nn.Conv2d(
-                in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+#         if in_channels != out_channels:
+#             self.reduction = nn.Conv2d(
+#                 in_channels, out_channels, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x):
-        z = self.block(x)
-        return z if self.in_channels == self.out_channels else self.reduction(z)
+#     def forward(self, x):
+#         z = self.block(x)
+#         return z if self.in_channels == self.out_channels else self.reduction(z)
 
 
 # class MidMetaNet(nn.Module):
