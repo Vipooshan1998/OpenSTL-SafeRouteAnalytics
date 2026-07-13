@@ -2,12 +2,24 @@ import cv2
 import numpy as np
 import torch
 
+# try:
+#     import lpips
+#     from skimage.metrics import structural_similarity as cal_ssim
+# except:
+#     lpips = None
+#     cal_ssim = None
+
 try:
     import lpips
-    from skimage.metrics import structural_similarity as cal_ssim
-except:
-    lpips = None
-    cal_ssim = None
+    print("lpips imported successfully")
+except Exception as e:
+    print("lpips failed:", e)
+
+try:
+    from skimage.metrics import structural_similarity
+    print("skimage imported successfully")
+except Exception as e:
+    print("skimage failed:", e)
 
 
 def rescale(x):
