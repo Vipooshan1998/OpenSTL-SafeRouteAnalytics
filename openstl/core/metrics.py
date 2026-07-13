@@ -256,6 +256,12 @@ def metric(pred, true, mean=None, std=None, metrics=['mae', 'mse'],
         
     pred = np.maximum(pred, clip_range[0])
     pred = np.minimum(pred, clip_range[1])
+
+    print("pred shape:", pred.shape)
+    print("true shape:", true.shape)
+    print("pred[0,0] shape:", pred[0,0].shape)
+    print("true[0,0] shape:", true[0,0].shape)
+
     if 'ssim' in metrics:
         ssim = 0
         for b in range(pred.shape[0]):
