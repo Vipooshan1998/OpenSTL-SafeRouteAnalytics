@@ -269,15 +269,19 @@ def metric(pred, true, mean=None, std=None, metrics=['mae', 'mse'],
                 # ssim += cal_ssim(pred[b, f].swapaxes(0, 2),
                 #                  true[b, f].swapaxes(0, 2), multichannel=True)
 
-                img_pred = pred[b, f]
-                img_true = true[b, f]
-                print("Original shape:", img_pred.shape)
-                img_pred = img_pred.squeeze()
-                img_true = img_true.squeeze()
-                print("After squeeze:", img_pred.shape)
+                # img_pred = pred[b, f]
+                # img_true = true[b, f]
+                # print("Original shape:", img_pred.shape)
+                # img_pred = img_pred.squeeze()
+                # img_true = img_true.squeeze()
+                # print("After squeeze:", img_pred.shape)
 
-                ssim += cal_ssim(pred[b, f].swapaxes(0, 2),
-                                 true[b, f].swapaxes(0, 2), data_range=1.0)
+                img_pred = pred[b, f, 0]
+                img_true = true[b, f, 0]
+
+                ssim += cal_ssim(img_pred,
+                                 img_true, data_range=1.0)
+
         eval_res['ssim'] = ssim / (pred.shape[0] * pred.shape[1])
 
     if 'psnr' in metrics:
