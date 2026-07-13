@@ -13,12 +13,14 @@ try:
     import lpips
     print("lpips imported successfully")
 except Exception as e:
+    lpips = None
     print("lpips failed:", e)
 
 try:
-    from skimage.metrics import structural_similarity
+    from skimage.metrics import structural_similarity as cal_ssim
     print("skimage imported successfully")
 except Exception as e:
+    cal_ssim = None
     print("skimage failed:", e)
 
 
