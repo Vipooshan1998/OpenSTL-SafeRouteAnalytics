@@ -68,7 +68,7 @@ class Base_method(l.LightningModule):
         pred_y = self(batch_x, batch_y)
         outputs = {'inputs': batch_x.cpu().numpy(), 'preds': pred_y.cpu().numpy(), 'trues': batch_y.cpu().numpy()}
         self.test_outputs.append(outputs)
-        print("Nimsara: Appended video.")
+        # print("Nimsara: Appended video.")
         return outputs
 
     def on_test_epoch_end(self):
