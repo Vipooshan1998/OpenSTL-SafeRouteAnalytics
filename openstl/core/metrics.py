@@ -260,8 +260,10 @@ def metric(pred, true, mean=None, std=None, metrics=['mae', 'mse'],
         ssim = 0
         for b in range(pred.shape[0]):
             for f in range(pred.shape[1]):
+                # ssim += cal_ssim(pred[b, f].swapaxes(0, 2),
+                #                  true[b, f].swapaxes(0, 2), multichannel=True)
                 ssim += cal_ssim(pred[b, f].swapaxes(0, 2),
-                                 true[b, f].swapaxes(0, 2), multichannel=True)
+                                 true[b, f].swapaxes(0, 2), channel_axis=-1, data_range=1.0)
         eval_res['ssim'] = ssim / (pred.shape[0] * pred.shape[1])
 
     if 'psnr' in metrics:
