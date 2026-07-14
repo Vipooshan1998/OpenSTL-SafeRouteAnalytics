@@ -85,7 +85,7 @@ class MovingMNIST(Dataset):
                 self.dataset = load_fixed_set(root, data_name)
         # self.length = int(1e4) if self.dataset is None else self.dataset.shape[1]
         # Sample the Training and Testing Data            
-        self.length = 5000 if self.dataset is None else 1000
+        self.length = 2000 if self.dataset is None else 1000
 
         self.num_objects = num_objects
         self.n_frames_input = n_frames_input
