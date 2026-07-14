@@ -83,7 +83,8 @@ class MovingMNIST(Dataset):
                 self.cifar = load_cifar(root, data_name)
             else:
                 self.dataset = load_fixed_set(root, data_name)
-        self.length = int(1e4) if self.dataset is None else self.dataset.shape[1]
+        # self.length = int(1e4) if self.dataset is None else self.dataset.shape[1]
+        self.length = int(5e3) if self.dataset is None else 1000
 
         self.num_objects = num_objects
         self.n_frames_input = n_frames_input
