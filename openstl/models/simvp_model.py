@@ -25,9 +25,14 @@ class SimVP_Model(nn.Module):
         self.dec = Decoder(hid_S, C, N_S, spatio_kernel_dec, act_inplace=act_inplace)
 
         model_type = 'gsta' if model_type is None else model_type.lower()
-        # model_type = 'cordsnet'
+        cords_depth = kwargs.pop('cords_depth', 3)
+        cords_timesteps = kwargs.pop('cords_timesteps', 1)
         if model_type == 'cordsnet':
-            self.hid = MidCORDSNet(T*hid_S, hid_T, N_T)
+            self.hid = MidCORDSNet(
+                T * hid_S, hid_T, N_T,
+                depth=cords_depth,
+                timesteps=cords_timesteps,
+            )
         else:
             # self.hid = ContinuousDynamicsNet(hid_S, hid_T, N_T)
             self.hid = MidMetaNet(T*hid_S, hid_T, N_T,
@@ -253,95 +258,65 @@ class MidMetaNet(nn.Module):
         return y
 
 
-class MidCORDSNet(nn.Module):
-    """A CORDSNet-inspired translator for SimVP.
+class CORDSBlock(nn.Module):
+    """A lightweight residual block used by the compact CORDS-style translator."""
 
-    This translator operates on flattened spatiotemporal latent features
-    in the same style as other SimVP hidden translators.
+    def __init__(self, channels, expansion=2):
+        super().__init__()
+        hidden = max(channels * expansion, 16)
+        self.norm = nn.GroupNorm(1, channels)
+        self.dw = nn.Conv2d(
+            channels, channels, kernel_size=3, padding=1, groups=channels, bias=False)
+        self.pw1 = nn.Conv2d(channels, hidden, kernel_size=1, bias=False)
+        self.act = nn.GELU()
+        self.pw2 = nn.Conv2d(hidden, channels, kernel_size=1, bias=False)
+
+    def forward(self, x):
+        residual = x
+        x = self.norm(x)
+        x = self.dw(x)
+        x = self.pw1(x)
+        x = self.act(x)
+        x = self.pw2(x)
+        return residual + x
+
+
+class MidCORDSNet(nn.Module):
+    """A compact CORDS-inspired translator for SimVP.
+
+    This version keeps the same interface as the original translator but
+    replaces the expensive recurrent-style stack with a smaller residual
+    refinement path that is faster and easier to optimize.
     """
 
-    def __init__(self, channel_in, channel_hid, N2, depth=8, timesteps=2):
+    def __init__(self, channel_in, channel_hid, N2, depth=3, timesteps=1, expansion=2):
         super().__init__()
-        assert depth >= 4 and depth % 2 == 0
+        assert depth >= 1
 
         self.channel_in = channel_in
         self.depth = depth
-        self.blockdepth = int(depth / 2 - 1)
-        self.timesteps = timesteps
+        self.timesteps = max(1, timesteps)
 
-        self.relu = nn.ReLU(inplace=False)
-        self.inp_conv = nn.Conv2d(channel_in, channel_in, kernel_size=7, stride=1, padding=3, bias=False)
-        self.inp_avgpool = nn.AvgPool2d(kernel_size=3, stride=1, padding=1, ceil_mode=False)
-        self.inp_skip = nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, bias=False)
-
-        self.area_conv = nn.ModuleList([
-            nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, bias=True)
-            for _ in range(depth)
+        self.proj_in = nn.Conv2d(channel_in, channel_hid, kernel_size=1, bias=False)
+        self.blocks = nn.ModuleList([
+            CORDSBlock(channel_hid, expansion=expansion) for _ in range(depth)
         ])
-        self.area_area = nn.ModuleList([
-            nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, bias=False)
-            for _ in range(depth)
-        ])
-        self.skip_area = nn.ModuleList([
-            nn.Conv2d(channel_in, channel_in, kernel_size=1, stride=1, padding=0, bias=False)
-            for _ in range(self.blockdepth)
-        ])
-
-        self.out_conv = nn.Conv2d(channel_in, channel_in, kernel_size=1, bias=False)
+        self.proj_out = nn.Conv2d(channel_hid, channel_in, kernel_size=1, bias=False)
         self.alpha = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
         B, T, C, H, W = x.shape
-        x = x.reshape(B, T*C, H, W)
-        x = self._run_cordsnet(x)
-        return x.reshape(B, T, C, H, W)
-
-    def _run_cordsnet(self, img):
-        batch_size = img.size(0)
-        device = img.device
-        dtype = img.dtype
-        rs = [torch.zeros(batch_size, self.channel_in, img.size(2), img.size(3), device=device, dtype=dtype)
-              for _ in range(self.depth)]
-
-        with torch.no_grad():
-            for _ in range(self.timesteps):
-                for j in range(self.depth - 1, -1, -1):
-                    rs[j] = self._rnn(j, rs, img * 0)
+        x = x.reshape(B, T * C, H, W)
+        z = self.proj_in(x)
 
         for _ in range(self.timesteps):
-            for j in range(self.depth - 1, -1, -1):
-                rs[j] = self._rnn(j, rs, img)
+            residual = z
+            for block in self.blocks:
+                z = block(z)
+            z = residual + torch.sigmoid(self.alpha) * (z - residual)
 
-        out = self.relu(rs[-1] + rs[-2])
-        out = self.out_conv(out)
-        return out
-
-    def _rnn(self, area, r, img):
-        inp = self.inp_avgpool(self.inp_conv(img))
-        if area == 0:
-            areainput = inp
-        elif area == 1:
-            areainput = self.relu(r[0]) + self.inp_skip(inp)
-        elif area == 2:
-            areainput = self.relu(r[1]) + self.relu(r[0])
-        elif area == 3:
-            areainput = self.relu(r[2]) + self.skip_area[0](self.relu(r[1]))
-        elif area == 4:
-            areainput = self.relu(r[3]) + self.relu(r[2])
-        elif area == 5:
-            areainput = self.relu(r[4]) + self.skip_area[1](self.relu(r[3]))
-        elif area == 6:
-            areainput = self.relu(r[5]) + self.relu(r[4])
-        elif area == 7:
-            areainput = self.relu(r[6]) + self.skip_area[2](self.relu(r[5]))
-        else:
-            raise ValueError(f"Unsupported CORDSNet area: {area}")
-
-        alpha = torch.sigmoid(self.alpha)
-        r[area] = (1 - alpha) * r[area] + alpha * self.relu(
-            self.area_conv[area](r[area]) + self.area_area[area](areainput)
-        )
-        return r[area]
+        z = self.proj_out(z)
+        return z.reshape(B, T, C, H, W)
 
 
 class ContinuousDynamicsBlock(nn.Module):
