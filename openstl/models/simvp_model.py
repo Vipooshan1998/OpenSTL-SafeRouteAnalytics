@@ -50,56 +50,6 @@ class SimVP_Model(nn.Module):
         return Y
 
 
-def sampling_generator(N, reverse=False):
-    samplings = [False, True] * (N // 2)
-    if reverse: return list(reversed(samplings[:N]))
-    else: return samplings[:N]
-
-
-class Encoder(nn.Module):
-    """3D Encoder for SimVP"""
-
-    def __init__(self, C_in, C_hid, N_S, spatio_kernel, act_inplace=True):
-        samplings = sampling_generator(N_S)
-        super(Encoder, self).__init__()
-        self.enc = nn.Sequential(
-              ConvSC(C_in, C_hid, spatio_kernel, downsampling=samplings[0],
-                     act_inplace=act_inplace),
-            *[ConvSC(C_hid, C_hid, spatio_kernel, downsampling=s,
-                     act_inplace=act_inplace) for s in samplings[1:]]
-        )
-
-    def forward(self, x):  # B*4, 3, 128, 128
-        enc1 = self.enc[0](x)
-        latent = enc1
-        for i in range(1, len(self.enc)):
-            latent = self.enc[i](latent)
-        return latent, enc1
-
-
-class Decoder(nn.Module):
-    """3D Decoder for SimVP"""
-
-    def __init__(self, C_hid, C_out, N_S, spatio_kernel, act_inplace=True):
-        samplings = sampling_generator(N_S, reverse=True)
-        super(Decoder, self).__init__()
-        self.dec = nn.Sequential(
-            *[ConvSC(C_hid, C_hid, spatio_kernel, upsampling=s,
-                     act_inplace=act_inplace) for s in samplings[:-1]],
-              ConvSC(C_hid, C_hid, spatio_kernel, upsampling=samplings[-1],
-                     act_inplace=act_inplace)
-        )
-        self.readout = nn.Conv2d(C_hid, C_out, 1)
-
-    def forward(self, hid, enc1=None):
-        for i in range(0, len(self.dec)-1):
-            hid = self.dec[i](hid)
-        Y = self.dec[-1](hid + enc1)
-        Y = self.readout(Y)
-        # Print the size (shape) of Y
-        #print(f"Shape of Y: {Y.shape}")
-        # Optionally, print the data type of Y
-        #print(f"Data type of Y: {Y.dtype}")
         return Y
 
 
@@ -253,6 +203,59 @@ class MidMetaNet(nn.Module):
         return y
 
 
+class ChannelSE(nn.Module):
+    """Squeeze-and-Excitation for flattened (T*C) channel maps."""
+
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, max(channels // reduction, 4)),
+            nn.ReLU(inplace=True),
+            nn.Linear(max(channels // reduction, 4), channels),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        # x: (B, C, H, W)
+        b, c, _, _ = x.shape
+        y = self.avgpool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y
+
+
+class TemporalMixer(nn.Module):
+    """Lightweight temporal mixer using depthwise 3D convs to improve time/channel coupling.
+
+    Operates on (B, T, C, H, W) and returns same shape.
+    """
+
+    def __init__(self, channels, kernel_size=(3,3,3), expansion=2, drop=0.0):
+        super().__init__()
+        hidden = channels * expansion
+        self.dw = nn.Conv3d(channels, channels, kernel_size=kernel_size,
+                            padding=(kernel_size[0]//2, kernel_size[1]//2, kernel_size[2]//2),
+                            groups=channels, bias=False)
+        self.pw1 = nn.Conv3d(channels, hidden, kernel_size=1, bias=False)
+        self.act = nn.GELU()
+        self.pw2 = nn.Conv3d(hidden, channels, kernel_size=1, bias=False)
+        self.drop = nn.Dropout3d(drop)
+
+    def forward(self, x):
+        # x: (B, T, C, H, W) -> permute to (B, C, T, H, W)
+        x = x.permute(0, 2, 1, 3, 4)
+        residual = x
+        x = self.dw(x)
+        x = self.pw1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.pw2(x)
+        out = residual + x
+        out = out.permute(0, 2, 1, 3, 4)
+        return out
+
+
+
 class MidCORDSNet(nn.Module):
     """A CORDSNet-inspired translator for SimVP.
 
@@ -260,7 +263,7 @@ class MidCORDSNet(nn.Module):
     in the same style as other SimVP hidden translators.
     """
 
-    def __init__(self, channel_in, channel_hid, N2, depth=4, timesteps=2):
+    def __init__(self, channel_in, channel_hid, N2, depth=8, timesteps=2):
         super().__init__()
         assert depth >= 4 and depth % 2 == 0
 
@@ -284,17 +287,54 @@ class MidCORDSNet(nn.Module):
         ])
         self.skip_area = nn.ModuleList([
             nn.Conv2d(channel_in, channel_in, kernel_size=1, stride=1, padding=0, bias=False)
-            for _ in range(min(self.blockdepth, 1))
+            for _ in range(self.blockdepth)
         ])
 
         self.out_conv = nn.Conv2d(channel_in, channel_in, kernel_size=1, bias=False)
         self.alpha = nn.Parameter(torch.zeros(1))
 
+        # Optional helpers to improve latent representation
+        # created lazily in forward when T and C are known
+        self.temporal_mixer = None
+        self.time_embedding = None
+        self.channel_se = ChannelSE(channel_in)
+        # residual projection and blending (keeps original _rnn intact)
+        self.res_conv = nn.Conv2d(channel_in, channel_in, kernel_size=1, bias=False)
+        self.res_alpha = nn.Parameter(torch.zeros(1))
+
     def forward(self, x):
         B, T, C, H, W = x.shape
-        x = x.reshape(B, T*C, H, W)
-        x = self._run_cordsnet(x)
-        return x.reshape(B, T, C, H, W)
+
+        # lazy create temporal_mixer and time embeddings when T and C are known
+        if self.temporal_mixer is None:
+            tm = TemporalMixer(C)
+            # register module so it's moved with .to(device)
+            self.add_module('temporal_mixer', tm)
+            self.temporal_mixer = tm
+
+        if self.time_embedding is None:
+            te = nn.Parameter(torch.zeros(T, C, 1, 1))
+            self.register_parameter('time_embedding', te)
+            self.time_embedding = te
+
+        # apply lightweight temporal mixing to improve time-channel coupling
+        x_mixed = self.temporal_mixer(x)
+
+        # run CORDSNet on flattened channels
+        flat = x_mixed.reshape(B, T*C, H, W)
+        out = self._run_cordsnet(flat)
+        # blend with a lightweight residual projection from input
+        out = out + torch.sigmoid(self.res_alpha) * self.res_conv(flat)
+        y = out.reshape(B, T, C, H, W)
+
+        # add learnable time embeddings (broadcasted)
+        y = y + self.time_embedding.unsqueeze(0)
+
+        # apply channel squeeze-excite on flattened channels for better channel weighting
+        y_flat = y.reshape(B, T*C, H, W)
+        y_se = self.channel_se(y_flat)
+
+        return y_se.reshape(B, T, C, H, W)
 
     def _run_cordsnet(self, img):
         batch_size = img.size(0)
@@ -325,9 +365,15 @@ class MidCORDSNet(nn.Module):
         elif area == 2:
             areainput = self.relu(r[1]) + self.relu(r[0])
         elif area == 3:
-            areainput = self.relu(r[2]) + self.relu(r[1])
+            areainput = self.relu(r[2]) + self.skip_area[0](self.relu(r[1]))
         elif area == 4:
             areainput = self.relu(r[3]) + self.relu(r[2])
+        elif area == 5:
+            areainput = self.relu(r[4]) + self.skip_area[1](self.relu(r[3]))
+        elif area == 6:
+            areainput = self.relu(r[5]) + self.relu(r[4])
+        elif area == 7:
+            areainput = self.relu(r[6]) + self.skip_area[2](self.relu(r[5]))
         else:
             raise ValueError(f"Unsupported CORDSNet area: {area}")
 
