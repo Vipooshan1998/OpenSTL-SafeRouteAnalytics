@@ -21,8 +21,11 @@ class SimVP_Model(nn.Module):
         T, C, H, W = in_shape  # T is pre_seq_length
         H, W = int(H / 2**(N_S/2)), int(W / 2**(N_S/2))  # downsample 1 / 2**(N_S/2)
         act_inplace = False
-        self.enc = Encoder(C, hid_S, N_S, spatio_kernel_enc, act_inplace=act_inplace)
-        self.dec = Decoder(hid_S, C, N_S, spatio_kernel_dec, act_inplace=act_inplace)
+        # defer Encoder/Decoder creation to avoid NameError during import-time instantiation
+        self.enc = None
+        self.dec = None
+        self._enc_cfg = dict(C_in=C, C_hid=hid_S, N_S=N_S, spatio_kernel=spatio_kernel_enc, act_inplace=act_inplace)
+        self._dec_cfg = dict(C_hid=hid_S, C_out=C, N_S=N_S, spatio_kernel=spatio_kernel_dec, act_inplace=act_inplace)
 
         model_type = 'gsta' if model_type is None else model_type.lower()
         # model_type = 'cordsnet'
@@ -36,6 +39,13 @@ class SimVP_Model(nn.Module):
 
     def forward(self, x_raw, **kwargs):
         B, T, C, H, W = x_raw.shape
+
+        # lazy-init encoder/decoder if classes were not available at module import
+        # if self.enc is None or self.dec is None:
+            # cfg = self._enc_cfg
+            # self.enc = Encoder(cfg['C_in'], cfg['C_hid'], cfg['N_S'], cfg['spatio_kernel'], act_inplace=cfg['act_inplace'])
+            # dcfg = self._dec_cfg
+            # self.dec = Decoder(dcfg['C_hid'], dcfg['C_out'], dcfg['N_S'], dcfg['spatio_kernel'], act_inplace=dcfg['act_inplace'])
         x = x_raw.view(B*T, C, H, W)
 
         embed, skip = self.enc(x)
