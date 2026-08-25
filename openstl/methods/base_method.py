@@ -41,14 +41,20 @@ class Base_method(l.LightningModule):
             },
         }
     
+    # def lr_scheduler_step(self, scheduler, metric):
+    #     if any(isinstance(scheduler, sch) for sch in timm_schedulers):
+    #         scheduler.step(epoch=self.current_epoch)
+    #     else:
+    #         if metric is None:
+    #             scheduler.step()
+    #         else:
+    #             scheduler.step(metric)
+
+    # Change
     def lr_scheduler_step(self, scheduler, metric):
-        if any(isinstance(scheduler, sch) for sch in timm_schedulers):
-            scheduler.step(epoch=self.current_epoch)
-        else:
-            if metric is None:
-                scheduler.step()
-            else:
-                scheduler.step(metric)
+        if hasattr(scheduler, 'total_steps') and hasattr(scheduler, 'last_epoch'):
+            if getattr(scheduler, 'last_epoch', 0) >= getattr(scheduler, 'total_steps', float('inf')):
+                return
 
     def forward(self, batch):
         NotImplementedError
