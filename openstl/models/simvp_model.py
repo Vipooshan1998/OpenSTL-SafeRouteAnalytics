@@ -21,11 +21,8 @@ class SimVP_Model(nn.Module):
         T, C, H, W = in_shape  # T is pre_seq_length
         H, W = int(H / 2**(N_S/2)), int(W / 2**(N_S/2))  # downsample 1 / 2**(N_S/2)
         act_inplace = False
-        # defer Encoder/Decoder creation to avoid NameError during import-time instantiation
-        self.enc = None
-        self.dec = None
-        self._enc_cfg = dict(C_in=C, C_hid=hid_S, N_S=N_S, spatio_kernel=spatio_kernel_enc, act_inplace=act_inplace)
-        self._dec_cfg = dict(C_hid=hid_S, C_out=C, N_S=N_S, spatio_kernel=spatio_kernel_dec, act_inplace=act_inplace)
+        self.enc = Encoder(C, hid_S, N_S, spatio_kernel_enc, act_inplace=act_inplace)
+        self.dec = Decoder(hid_S, C, N_S, spatio_kernel_dec, act_inplace=act_inplace)
 
         model_type = 'gsta' if model_type is None else model_type.lower()
         # model_type = 'cordsnet'
@@ -39,13 +36,6 @@ class SimVP_Model(nn.Module):
 
     def forward(self, x_raw, **kwargs):
         B, T, C, H, W = x_raw.shape
-
-        # lazy-init encoder/decoder if classes were not available at module import
-        # if self.enc is None or self.dec is None:
-            # cfg = self._enc_cfg
-            # self.enc = Encoder(cfg['C_in'], cfg['C_hid'], cfg['N_S'], cfg['spatio_kernel'], act_inplace=cfg['act_inplace'])
-            # dcfg = self._dec_cfg
-            # self.dec = Decoder(dcfg['C_hid'], dcfg['C_out'], dcfg['N_S'], dcfg['spatio_kernel'], act_inplace=dcfg['act_inplace'])
         x = x_raw.view(B*T, C, H, W)
 
         embed, skip = self.enc(x)
@@ -60,6 +50,56 @@ class SimVP_Model(nn.Module):
         return Y
 
 
+def sampling_generator(N, reverse=False):
+    samplings = [False, True] * (N // 2)
+    if reverse: return list(reversed(samplings[:N]))
+    else: return samplings[:N]
+
+
+class Encoder(nn.Module):
+    """3D Encoder for SimVP"""
+
+    def __init__(self, C_in, C_hid, N_S, spatio_kernel, act_inplace=True):
+        samplings = sampling_generator(N_S)
+        super(Encoder, self).__init__()
+        self.enc = nn.Sequential(
+              ConvSC(C_in, C_hid, spatio_kernel, downsampling=samplings[0],
+                     act_inplace=act_inplace),
+            *[ConvSC(C_hid, C_hid, spatio_kernel, downsampling=s,
+                     act_inplace=act_inplace) for s in samplings[1:]]
+        )
+
+    def forward(self, x):  # B*4, 3, 128, 128
+        enc1 = self.enc[0](x)
+        latent = enc1
+        for i in range(1, len(self.enc)):
+            latent = self.enc[i](latent)
+        return latent, enc1
+
+
+class Decoder(nn.Module):
+    """3D Decoder for SimVP"""
+
+    def __init__(self, C_hid, C_out, N_S, spatio_kernel, act_inplace=True):
+        samplings = sampling_generator(N_S, reverse=True)
+        super(Decoder, self).__init__()
+        self.dec = nn.Sequential(
+            *[ConvSC(C_hid, C_hid, spatio_kernel, upsampling=s,
+                     act_inplace=act_inplace) for s in samplings[:-1]],
+              ConvSC(C_hid, C_hid, spatio_kernel, upsampling=samplings[-1],
+                     act_inplace=act_inplace)
+        )
+        self.readout = nn.Conv2d(C_hid, C_out, 1)
+
+    def forward(self, hid, enc1=None):
+        for i in range(0, len(self.dec)-1):
+            hid = self.dec[i](hid)
+        Y = self.dec[-1](hid + enc1)
+        Y = self.readout(Y)
+        # Print the size (shape) of Y
+        #print(f"Shape of Y: {Y.shape}")
+        # Optionally, print the data type of Y
+        #print(f"Data type of Y: {Y.dtype}")
         return Y
 
 
@@ -213,64 +253,14 @@ class MidMetaNet(nn.Module):
         return y
 
 
-class ChannelSE(nn.Module):
-    """Squeeze-and-Excitation for flattened (T*C) channel maps."""
-
-    def __init__(self, channels, reduction=16):
-        super().__init__()
-        self.avgpool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(channels, max(channels // reduction, 4)),
-            nn.ReLU(inplace=True),
-            nn.Linear(max(channels // reduction, 4), channels),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        # x: (B, C, H, W)
-        b, c, _, _ = x.shape
-        y = self.avgpool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y
-
-
-class TemporalMixer(nn.Module):
-    """Lightweight temporal mixer using depthwise 3D convs to improve time/channel coupling.
-
-    Operates on (B, T, C, H, W) and returns same shape.
-    """
-
-    def __init__(self, channels, kernel_size=(3,3,3), expansion=2, drop=0.0):
-        super().__init__()
-        hidden = channels * expansion
-        self.dw = nn.Conv3d(channels, channels, kernel_size=kernel_size,
-                            padding=(kernel_size[0]//2, kernel_size[1]//2, kernel_size[2]//2),
-                            groups=channels, bias=False)
-        self.pw1 = nn.Conv3d(channels, hidden, kernel_size=1, bias=False)
-        self.act = nn.GELU()
-        self.pw2 = nn.Conv3d(hidden, channels, kernel_size=1, bias=False)
-        self.drop = nn.Dropout3d(drop)
-
-    def forward(self, x):
-        # x: (B, T, C, H, W) -> permute to (B, C, T, H, W)
-        x = x.permute(0, 2, 1, 3, 4)
-        residual = x
-        x = self.dw(x)
-        x = self.pw1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.pw2(x)
-        out = residual + x
-        out = out.permute(0, 2, 1, 3, 4)
-        return out
-
-
-
 class MidCORDSNet(nn.Module):
-    """A CORDSNet-inspired translator for SimVP.
+    """Hybrid CORDSNet + temporal latent dynamics for SimVP.
 
-    This translator operates on flattened spatiotemporal latent features
-    in the same style as other SimVP hidden translators.
+    The update still follows the residual recurrent form
+    h_{k+1} = (1 - alpha) h_k + alpha * F(h_k, x_k),
+    but F is enriched with temporal mixing and stronger skip/context paths
+    to improve long-horizon future-frame prediction while keeping the
+    CORDSNet dynamical-system design.
     """
 
     def __init__(self, channel_in, channel_hid, N2, depth=8, timesteps=2):
@@ -280,12 +270,20 @@ class MidCORDSNet(nn.Module):
         self.channel_in = channel_in
         self.depth = depth
         self.blockdepth = int(depth / 2 - 1)
-        self.timesteps = timesteps
+        self.timesteps = max(1, timesteps)
 
         self.relu = nn.ReLU(inplace=False)
         self.inp_conv = nn.Conv2d(channel_in, channel_in, kernel_size=7, stride=1, padding=3, bias=False)
         self.inp_avgpool = nn.AvgPool2d(kernel_size=3, stride=1, padding=1, ceil_mode=False)
         self.inp_skip = nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, bias=False)
+
+        # Temporal mixing over latent time steps to make the recurrent state
+        # aware of motion across the sequence instead of only local area updates.
+        self.temporal_mix = nn.Sequential(
+            nn.Conv3d(channel_in, channel_in, kernel_size=(3, 1, 1), padding=(1, 0, 0), groups=channel_in, bias=False),
+            nn.GELU(),
+            nn.Conv3d(channel_in, channel_in, kernel_size=(3, 1, 1), padding=(1, 0, 0), groups=channel_in, bias=False),
+        )
 
         self.area_conv = nn.ModuleList([
             nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, bias=True)
@@ -295,56 +293,30 @@ class MidCORDSNet(nn.Module):
             nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, bias=False)
             for _ in range(depth)
         ])
+        self.context_mix = nn.ModuleList([
+            nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, groups=channel_in, bias=False)
+            for _ in range(depth)
+        ])
         self.skip_area = nn.ModuleList([
             nn.Conv2d(channel_in, channel_in, kernel_size=1, stride=1, padding=0, bias=False)
             for _ in range(self.blockdepth)
         ])
+        self.latent_gate = nn.ModuleList([
+            nn.Conv2d(channel_in, channel_in, kernel_size=1, stride=1, padding=0, bias=True)
+            for _ in range(depth)
+        ])
 
         self.out_conv = nn.Conv2d(channel_in, channel_in, kernel_size=1, bias=False)
-        self.alpha = nn.Parameter(torch.zeros(1))
-
-        # Optional helpers to improve latent representation
-        # created lazily in forward when T and C are known
-        self.temporal_mixer = None
-        self.time_embedding = None
-        self.channel_se = ChannelSE(channel_in)
-        # residual projection and blending (keeps original _rnn intact)
-        self.res_conv = nn.Conv2d(channel_in, channel_in, kernel_size=1, bias=False)
-        self.res_alpha = nn.Parameter(torch.zeros(1))
+        self.alpha = nn.Parameter(torch.zeros(depth))
+        self.beta = nn.Parameter(torch.zeros(depth))
 
     def forward(self, x):
         B, T, C, H, W = x.shape
-
-        # lazy create temporal_mixer and time embeddings when T and C are known
-        if self.temporal_mixer is None:
-            tm = TemporalMixer(C)
-            # register module so it's moved with .to(device)
-            self.add_module('temporal_mixer', tm)
-            self.temporal_mixer = tm
-
-        if self.time_embedding is None:
-            te = nn.Parameter(torch.zeros(T, C, 1, 1))
-            self.register_parameter('time_embedding', te)
-            self.time_embedding = te
-
-        # apply lightweight temporal mixing to improve time-channel coupling
-        x_mixed = self.temporal_mixer(x)
-
-        # run CORDSNet on flattened channels
-        flat = x_mixed.reshape(B, T*C, H, W)
-        out = self._run_cordsnet(flat)
-        # blend with a lightweight residual projection from input
-        out = out + torch.sigmoid(self.res_alpha) * self.res_conv(flat)
-        y = out.reshape(B, T, C, H, W)
-
-        # add learnable time embeddings (broadcasted)
-        y = y + self.time_embedding.unsqueeze(0)
-
-        # apply channel squeeze-excite on flattened channels for better channel weighting
-        y_flat = y.reshape(B, T*C, H, W)
-        y_se = self.channel_se(y_flat)
-
-        return y_se.reshape(B, T, C, H, W)
+        x = x.permute(0, 2, 1, 3, 4)  # (B, C, T, H, W)
+        x = self.temporal_mix(x)
+        x = x.permute(0, 2, 1, 3, 4).reshape(B, T * C, H, W)
+        x = self._run_cordsnet(x)
+        return x.reshape(B, T, C, H, W)
 
     def _run_cordsnet(self, img):
         batch_size = img.size(0)
@@ -353,11 +325,9 @@ class MidCORDSNet(nn.Module):
         rs = [torch.zeros(batch_size, self.channel_in, img.size(2), img.size(3), device=device, dtype=dtype)
               for _ in range(self.depth)]
 
-        with torch.no_grad():
-            for _ in range(self.timesteps):
-                for j in range(self.depth - 1, -1, -1):
-                    rs[j] = self._rnn(j, rs, img * 0)
-
+        # A lightweight initialization pass is kept, but without freezing the
+        # recurrent state in no_grad. This preserves the dynamical equilibrium
+        # idea while allowing learning to remain effective.
         for _ in range(self.timesteps):
             for j in range(self.depth - 1, -1, -1):
                 rs[j] = self._rnn(j, rs, img)
@@ -387,10 +357,16 @@ class MidCORDSNet(nn.Module):
         else:
             raise ValueError(f"Unsupported CORDSNet area: {area}")
 
-        alpha = torch.sigmoid(self.alpha)
-        r[area] = (1 - alpha) * r[area] + alpha * self.relu(
-            self.area_conv[area](r[area]) + self.area_area[area](areainput)
-        )
+        alpha = torch.sigmoid(self.alpha[area]).view(1, 1, 1, 1)
+        beta = torch.sigmoid(self.beta[area]).view(1, 1, 1, 1)
+
+        candidate = self.area_conv[area](r[area]) + self.area_area[area](areainput)
+        candidate = self.context_mix[area](candidate)
+        gated = self.latent_gate[area](self.relu(candidate))
+
+        # Preserve the CORDSNet residual dynamics while adding stronger
+        # temporal-context modulation and input-conditioned skip feedback.
+        r[area] = (1 - alpha) * r[area] + alpha * gated + beta * self.relu(areainput)
         return r[area]
 
 
