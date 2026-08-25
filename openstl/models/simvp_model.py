@@ -277,12 +277,14 @@ class MidCORDSNet(nn.Module):
         self.inp_avgpool = nn.AvgPool2d(kernel_size=3, stride=1, padding=1, ceil_mode=False)
         self.inp_skip = nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, bias=False)
 
-        # Temporal mixing over latent time steps to make the recurrent state
-        # aware of motion across the sequence instead of only local area updates.
+        # The latent representation is flattened as (B, T*C, H, W), so the
+        # temporal mixer must operate on that channel axis rather than on a
+        # synthetic (B, C, T, H, W) tensor. A depthwise 2D mixer preserves the
+        # CORDSNet update design while matching the actual SimVP tensor layout.
         self.temporal_mix = nn.Sequential(
-            nn.Conv3d(channel_in, channel_in, kernel_size=(3, 1, 1), padding=(1, 0, 0), groups=channel_in, bias=False),
+            nn.Conv2d(channel_in, channel_in, kernel_size=3, padding=1, groups=channel_in, bias=False),
             nn.GELU(),
-            nn.Conv3d(channel_in, channel_in, kernel_size=(3, 1, 1), padding=(1, 0, 0), groups=channel_in, bias=False),
+            nn.Conv2d(channel_in, channel_in, kernel_size=3, padding=1, groups=channel_in, bias=False),
         )
 
         self.area_conv = nn.ModuleList([
@@ -312,9 +314,8 @@ class MidCORDSNet(nn.Module):
 
     def forward(self, x):
         B, T, C, H, W = x.shape
-        x = x.permute(0, 2, 1, 3, 4)  # (B, C, T, H, W)
+        x = x.reshape(B, T * C, H, W)
         x = self.temporal_mix(x)
-        x = x.permute(0, 2, 1, 3, 4).reshape(B, T * C, H, W)
         x = self._run_cordsnet(x)
         return x.reshape(B, T, C, H, W)
 
