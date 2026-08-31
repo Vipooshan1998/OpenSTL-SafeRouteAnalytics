@@ -25,9 +25,11 @@ class SimVP_Model(nn.Module):
         self.dec = Decoder(hid_S, C, N_S, spatio_kernel_dec, act_inplace=act_inplace)
 
         model_type = 'gsta' if model_type is None else model_type.lower()
-        # model_type = 'cordsnet'
+        # support cordsnet (2D) and cordsnet3d (3D CORDSNet variant)
         if model_type == 'cordsnet':
             self.hid = MidCORDSNet(T*hid_S, hid_T, N_T)
+        elif model_type == 'cordsnet3d':
+            self.hid = MidCORDSNet3D(T*hid_S, hid_T, N_T)
         else:
             # self.hid = ContinuousDynamicsNet(hid_S, hid_T, N_T)
             self.hid = MidMetaNet(T*hid_S, hid_T, N_T,
@@ -254,13 +256,10 @@ class MidMetaNet(nn.Module):
 
 
 class MidCORDSNet(nn.Module):
-    """Hybrid CORDSNet + temporal latent dynamics for SimVP.
+    """A CORDSNet-inspired translator for SimVP.
 
-    The update still follows the residual recurrent form
-    h_{k+1} = (1 - alpha) h_k + alpha * F(h_k, x_k),
-    but F is enriched with temporal mixing and stronger skip/context paths
-    to improve long-horizon future-frame prediction while keeping the
-    CORDSNet dynamical-system design.
+    This translator operates on flattened spatiotemporal latent features
+    in the same style as other SimVP hidden translators.
     """
 
     def __init__(self, channel_in, channel_hid, N2, depth=8, timesteps=2):
@@ -270,22 +269,12 @@ class MidCORDSNet(nn.Module):
         self.channel_in = channel_in
         self.depth = depth
         self.blockdepth = int(depth / 2 - 1)
-        self.timesteps = max(1, timesteps)
+        self.timesteps = timesteps
 
         self.relu = nn.ReLU(inplace=False)
         self.inp_conv = nn.Conv2d(channel_in, channel_in, kernel_size=7, stride=1, padding=3, bias=False)
         self.inp_avgpool = nn.AvgPool2d(kernel_size=3, stride=1, padding=1, ceil_mode=False)
         self.inp_skip = nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, bias=False)
-
-        # The latent representation is flattened as (B, T*C, H, W), so the
-        # temporal mixer must operate on that channel axis rather than on a
-        # synthetic (B, C, T, H, W) tensor. A depthwise 2D mixer preserves the
-        # CORDSNet update design while matching the actual SimVP tensor layout.
-        self.temporal_mix = nn.Sequential(
-            nn.Conv2d(channel_in, channel_in, kernel_size=3, padding=1, groups=channel_in, bias=False),
-            nn.GELU(),
-            nn.Conv2d(channel_in, channel_in, kernel_size=3, padding=1, groups=channel_in, bias=False),
-        )
 
         self.area_conv = nn.ModuleList([
             nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, bias=True)
@@ -295,27 +284,17 @@ class MidCORDSNet(nn.Module):
             nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, bias=False)
             for _ in range(depth)
         ])
-        self.context_mix = nn.ModuleList([
-            nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, groups=channel_in, bias=False)
-            for _ in range(depth)
-        ])
         self.skip_area = nn.ModuleList([
             nn.Conv2d(channel_in, channel_in, kernel_size=1, stride=1, padding=0, bias=False)
             for _ in range(self.blockdepth)
         ])
-        self.latent_gate = nn.ModuleList([
-            nn.Conv2d(channel_in, channel_in, kernel_size=1, stride=1, padding=0, bias=True)
-            for _ in range(depth)
-        ])
 
         self.out_conv = nn.Conv2d(channel_in, channel_in, kernel_size=1, bias=False)
-        self.alpha = nn.Parameter(torch.zeros(depth))
-        self.beta = nn.Parameter(torch.zeros(depth))
+        self.alpha = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
         B, T, C, H, W = x.shape
-        x = x.reshape(B, T * C, H, W)
-        x = self.temporal_mix(x)
+        x = x.reshape(B, T*C, H, W)
         x = self._run_cordsnet(x)
         return x.reshape(B, T, C, H, W)
 
@@ -326,9 +305,11 @@ class MidCORDSNet(nn.Module):
         rs = [torch.zeros(batch_size, self.channel_in, img.size(2), img.size(3), device=device, dtype=dtype)
               for _ in range(self.depth)]
 
-        # A lightweight initialization pass is kept, but without freezing the
-        # recurrent state in no_grad. This preserves the dynamical equilibrium
-        # idea while allowing learning to remain effective.
+        with torch.no_grad():
+            for _ in range(self.timesteps):
+                for j in range(self.depth - 1, -1, -1):
+                    rs[j] = self._rnn(j, rs, img * 0)
+
         for _ in range(self.timesteps):
             for j in range(self.depth - 1, -1, -1):
                 rs[j] = self._rnn(j, rs, img)
@@ -358,16 +339,106 @@ class MidCORDSNet(nn.Module):
         else:
             raise ValueError(f"Unsupported CORDSNet area: {area}")
 
-        alpha = torch.sigmoid(self.alpha[area]).view(1, 1, 1, 1)
-        beta = torch.sigmoid(self.beta[area]).view(1, 1, 1, 1)
+        alpha = torch.sigmoid(self.alpha)
+        r[area] = (1 - alpha) * r[area] + alpha * self.relu(
+            self.area_conv[area](r[area]) + self.area_area[area](areainput)
+        )
+        return r[area]
 
-        candidate = self.area_conv[area](r[area]) + self.area_area[area](areainput)
-        candidate = self.context_mix[area](candidate)
-        gated = self.latent_gate[area](self.relu(candidate))
 
-        # Preserve the CORDSNet residual dynamics while adding stronger
-        # temporal-context modulation and input-conditioned skip feedback.
-        r[area] = (1 - alpha) * r[area] + alpha * gated + beta * self.relu(areainput)
+class MidCORDSNet3D(nn.Module):
+    """A 3D CORDSNet-inspired translator for SimVP.
+
+    This variant replaces 2D convolutions with 3D convolutions so the
+    same CORDSNet equations operate over (T, H, W) spatiotemporal volumes.
+    """
+
+    def __init__(self, channel_in, channel_hid, N2, depth=8, timesteps=2):
+        super().__init__()
+        assert depth >= 4 and depth % 2 == 0
+
+        self.channel_in = channel_in
+        self.depth = depth
+        self.blockdepth = int(depth / 2 - 1)
+        self.timesteps = timesteps
+
+        self.relu = nn.ReLU(inplace=False)
+        # temporal kernel included (3) and spatial kernel (7x7) to preserve receptive field
+        self.inp_conv = nn.Conv3d(channel_in, channel_in, kernel_size=(3, 7, 7), stride=1, padding=(1, 3, 3), bias=False)
+        # pool spatially only to mimic original AvgPool2d behavior across H,W
+        self.inp_avgpool = nn.AvgPool3d(kernel_size=(1, 3, 3), stride=1, padding=(0, 1, 1), ceil_mode=False)
+        self.inp_skip = nn.Conv3d(channel_in, channel_in, kernel_size=(1, 3, 3), stride=1, padding=(0, 1, 1), bias=False)
+
+        self.area_conv = nn.ModuleList([
+            nn.Conv3d(channel_in, channel_in, kernel_size=(3, 3, 3), stride=1, padding=1, bias=True)
+            for _ in range(depth)
+        ])
+        self.area_area = nn.ModuleList([
+            nn.Conv3d(channel_in, channel_in, kernel_size=(3, 3, 3), stride=1, padding=1, bias=False)
+            for _ in range(depth)
+        ])
+        self.skip_area = nn.ModuleList([
+            nn.Conv3d(channel_in, channel_in, kernel_size=1, stride=1, padding=0, bias=False)
+            for _ in range(self.blockdepth)
+        ])
+
+        self.out_conv = nn.Conv3d(channel_in, channel_in, kernel_size=1, bias=False)
+        self.alpha = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        # x: (B, T, C, H, W) -> convert to (B, C, T, H, W) for Conv3d
+        B, T, C, H, W = x.shape
+        x = x.permute(0, 2, 1, 3, 4).contiguous()
+        x = self._run_cordsnet(x)
+        x = x.permute(0, 2, 1, 3, 4).contiguous()
+        return x
+
+    def _run_cordsnet(self, img):
+        batch_size = img.size(0)
+        device = img.device
+        dtype = img.dtype
+        # img shape: (B, C, T, H, W)
+        rs = [torch.zeros(batch_size, self.channel_in, img.size(2), img.size(3), img.size(4), device=device, dtype=dtype)
+              for _ in range(self.depth)]
+
+        with torch.no_grad():
+            for _ in range(self.timesteps):
+                for j in range(self.depth - 1, -1, -1):
+                    rs[j] = self._rnn(j, rs, img * 0)
+
+        for _ in range(self.timesteps):
+            for j in range(self.depth - 1, -1, -1):
+                rs[j] = self._rnn(j, rs, img)
+
+        out = self.relu(rs[-1] + rs[-2])
+        out = self.out_conv(out)
+        return out
+
+    def _rnn(self, area, r, img):
+        inp = self.inp_avgpool(self.inp_conv(img))
+        if area == 0:
+            areainput = inp
+        elif area == 1:
+            areainput = self.relu(r[0]) + self.inp_skip(inp)
+        elif area == 2:
+            areainput = self.relu(r[1]) + self.relu(r[0])
+        elif area == 3:
+            areainput = self.relu(r[2]) + self.skip_area[0](self.relu(r[1]))
+        elif area == 4:
+            areainput = self.relu(r[3]) + self.relu(r[2])
+        elif area == 5:
+            areainput = self.relu(r[4]) + self.skip_area[1](self.relu(r[3]))
+        elif area == 6:
+            areainput = self.relu(r[5]) + self.relu(r[4])
+        elif area == 7:
+            areainput = self.relu(r[6]) + self.skip_area[2](self.relu(r[5]))
+        else:
+            raise ValueError(f"Unsupported CORDSNet area: {area}")
+
+        alpha = torch.sigmoid(self.alpha)
+        r[area] = (1 - alpha) * r[area] + alpha * self.relu(
+            self.area_conv[area](r[area]) + self.area_area[area](areainput)
+        )
         return r[area]
 
 
