@@ -29,7 +29,9 @@ class SimVP_Model(nn.Module):
         if model_type == 'cordsnet':
             self.hid = MidCORDSNet(T*hid_S, hid_T, N_T)
         elif model_type == 'cordsnet3d':
-            self.hid = MidCORDSNet3D(T*hid_S, hid_T, N_T)
+            # MidCORDSNet3D operates on per-frame channels (C), not flattened T*C.
+            # Pass hid_S (per-frame feature channels) here.
+            self.hid = MidCORDSNet3D(hid_S, hid_T, N_T)
         else:
             # self.hid = ContinuousDynamicsNet(hid_S, hid_T, N_T)
             self.hid = MidMetaNet(T*hid_S, hid_T, N_T,
