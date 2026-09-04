@@ -88,15 +88,16 @@ class GroupConv2d(nn.Module):
                  padding=0,
                  groups=1,
                  act_norm=False,
-                 act_inplace=True):
+                 act_inplace=True,
+                 bias=True):
         super(GroupConv2d, self).__init__()
         self.act_norm=act_norm
         if in_channels % groups != 0:
             groups=1
         self.conv = nn.Conv2d(
             in_channels, out_channels, kernel_size=kernel_size,
-            stride=stride, padding=padding, groups=groups)
-        self.norm = nn.GroupNorm(groups,out_channels)
+            stride=stride, padding=padding, groups=groups, bias=bias)
+        self.norm = nn.GroupNorm(groups, out_channels) if act_norm else nn.Identity()
         self.activate = nn.LeakyReLU(0.2, inplace=act_inplace)
 
     def forward(self, x):
@@ -109,15 +110,17 @@ class GroupConv2d(nn.Module):
 class gInception_ST(nn.Module):
     """A IncepU block for SimVP"""
 
-    def __init__(self, C_in, C_hid, C_out, incep_ker = [3,5,7,11], groups = 8):        
+    def __init__(self, C_in, C_hid, C_out, incep_ker = [3,5,7,11], groups = 8,
+                 act_norm=True, bias=True):
         super(gInception_ST, self).__init__()
-        self.conv1 = nn.Conv2d(C_in, C_hid, kernel_size=1, stride=1, padding=0)
+        self.conv1 = nn.Conv2d(
+            C_in, C_hid, kernel_size=1, stride=1, padding=0, bias=bias)
 
         layers = []
         for ker in incep_ker:
             layers.append(GroupConv2d(
                 C_hid, C_out, kernel_size=ker, stride=1,
-                padding=ker//2, groups=groups, act_norm=True))
+                padding=ker//2, groups=groups, act_norm=act_norm, bias=bias))
         self.layers = nn.Sequential(*layers)
 
     def forward(self, x):

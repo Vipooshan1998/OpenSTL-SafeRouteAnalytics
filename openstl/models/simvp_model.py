@@ -6,6 +6,20 @@ from openstl.modules import (ConvSC, ConvNeXtSubBlock, ConvMixerSubBlock, GASubB
                              SwinSubBlock, UniformerSubBlock, VANSubBlock, ViTSubBlock, TAUSubBlock)
 
 
+class InceptionRec(nn.Module):
+    """Normalization-free SimVP Inception operator for CordsNet dynamics."""
+
+    def __init__(self, channels):
+        super().__init__()
+        self.inception = gInception_ST(
+            channels, channels, channels, incep_ker=[3, 5, 7, 11],
+            groups=1, act_norm=False, bias=False)
+        self.bias = nn.Parameter(torch.zeros(channels))
+
+    def forward(self, x):
+        return self.inception(x) + self.bias.view(1, -1, 1, 1)
+
+
 class SimVP_Model(nn.Module):
     r"""SimVP Model
 
@@ -279,7 +293,7 @@ class MidCORDSNet(nn.Module):
         self.inp_skip = nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, bias=False)
 
         self.area_conv = nn.ModuleList([
-            nn.Conv2d(channel_in, channel_in, kernel_size=3, stride=1, padding=1, bias=True)
+            InceptionRec(channel_in)
             for _ in range(depth)
         ])
         self.area_area = nn.ModuleList([
